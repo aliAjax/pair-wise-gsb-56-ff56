@@ -1,4 +1,5 @@
 import type {
+  ControlledCopy,
   FileVersion,
   LicenseRule,
   MaterialFile,
@@ -7,6 +8,7 @@ import type {
   WorkspaceState,
 } from '@/types/domain'
 import { createApprovalRoute, validatePackage } from './rules'
+import { captureControlledCopy } from './copies'
 
 function pages(
   count: number,
@@ -132,11 +134,23 @@ export function createInitialState(): WorkspaceState {
       technologyTags: ['复合材料', '工艺参数'],
       personnelScopes: ['第三方承包商'],
       declarations: ['最终用户声明', '最终用途声明'],
-      status: 'reviewing',
+      status: 'rechecking',
       matchedRuleId: 'rule-sg-composite',
-      approvalRoute: createApprovalRoute('enhanced'),
+      approvalRoute: createApprovalRoute('enhanced').map((step, index) =>
+        index === 0
+          ? {
+              ...step,
+              status: 'stale' as const,
+              comment: '现行页与脱敏结论已核对，同意进入技术安全审查。',
+              decidedAt: '2026-09-27T06:10:00.000Z',
+            }
+          : index === 1
+            ? { ...step, status: 'stale' as const }
+            : { ...step },
+      ),
       currentRound: 1,
       quotaUsed: 36,
+      quotaReserved: 0,
       quotaLimit: 80,
       createdAt: '2026-09-20T02:10:00.000Z',
       updatedAt: now,
@@ -164,6 +178,7 @@ export function createInitialState(): WorkspaceState {
       })),
       currentRound: 1,
       quotaUsed: 42,
+      quotaReserved: 0,
       quotaLimit: 120,
       createdAt: '2026-09-18T04:30:00.000Z',
       updatedAt: '2026-09-27T03:20:00.000Z',
@@ -195,6 +210,7 @@ export function createInitialState(): WorkspaceState {
       ),
       currentRound: 2,
       quotaUsed: 27,
+      quotaReserved: 0,
       quotaLimit: 30,
       createdAt: '2026-09-16T01:15:00.000Z',
       updatedAt: '2026-09-26T08:10:00.000Z',
@@ -217,6 +233,7 @@ export function createInitialState(): WorkspaceState {
       approvalRoute: [],
       currentRound: 0,
       quotaUsed: 8,
+      quotaReserved: 0,
       quotaLimit: 100,
       createdAt: '2026-09-28T00:20:00.000Z',
       updatedAt: now,
@@ -325,11 +342,45 @@ export function createInitialState(): WorkspaceState {
   const findings = packages.flatMap((packageItem) =>
     validatePackage(packageItem, files, rules),
   )
+
+  // 受控副本种子：pkg-001 收拢后原件升级失效（待复核）；pkg-002 已完成签署落章（待核销）。
+  const controlledCopies: ControlledCopy[] = []
+
+  const staleCopy = captureControlledCopy(
+    packages.find((item) => item.id === 'pkg-001')!,
+    files,
+  )
+  staleCopy.status = 'invalidated'
+  staleCopy.invalidatedAt = '2026-09-27T08:00:00.000Z'
+  staleCopy.invalidateReason = '铺层工艺规程.pdf 的引用版本已切换；现行页分类或脱敏结论已修改'
+  controlledCopies.push(staleCopy)
+
+  const sealedCopy = captureControlledCopy(
+    packages.find((item) => item.id === 'pkg-002')!,
+    files,
+  )
+  sealedCopy.status = 'sealed'
+  sealedCopy.sealedAt = '2026-09-27T03:20:00.000Z'
+  sealedCopy.sealedBy = '合规专员'
+  controlledCopies.push(sealedCopy)
+
+  packages.forEach((packageItem) => {
+    const copy = controlledCopies.find((item) => item.packageId === packageItem.id)
+    if (!copy) return
+    packageItem.approvalRoute.forEach((step) => {
+      step.copyId = copy.id
+    })
+    if (packageItem.id === 'pkg-002') packageItem.activeCopyId = copy.id
+  })
+
   return {
     packages,
     files,
     rules,
     findings,
+    controlledCopies,
+    revision: 1,
+    processedRequests: [],
     comments: [
       {
         id: 'comment-1',
@@ -390,6 +441,7 @@ export const packageStatusLabels: Record<MaterialPackage['status'], string> = {
   draft: '草稿',
   validating: '校验中',
   reviewing: '审批中',
+  rechecking: '待复核',
   returned: '已退回',
   approved: '已批准',
   licensed: '已许可',

@@ -112,7 +112,13 @@ export function PackageListPage() {
     const now = new Date().toISOString()
     const draft: Omit<
       MaterialPackage,
-      'id' | 'approvalRoute' | 'versions' | 'currentRound' | 'createdAt' | 'updatedAt'
+      | 'id'
+      | 'approvalRoute'
+      | 'versions'
+      | 'currentRound'
+      | 'quotaReserved'
+      | 'createdAt'
+      | 'updatedAt'
     > = {
       ...values,
       code: `EC-2026-${String(data!.packages.length + 1).padStart(3, '0')}`,
@@ -128,6 +134,7 @@ export function PackageListPage() {
             approvalRoute: [],
             currentRound: 0,
             quotaUsed: 0,
+            quotaReserved: 0,
             quotaLimit: 0,
             createdAt: now,
             updatedAt: now,
@@ -181,6 +188,7 @@ export function PackageListPage() {
             { value: 'draft', label: '草稿' },
             { value: 'validating', label: '校验中' },
             { value: 'reviewing', label: '审批中' },
+            { value: 'rechecking', label: '待复核' },
             { value: 'returned', label: '已退回' },
             { value: 'approved', label: '已批准' },
             { value: 'licensed', label: '已许可' },
