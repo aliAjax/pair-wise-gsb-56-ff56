@@ -136,7 +136,7 @@ export function validatePackage(
     (max, step) => Math.max(max, levelRank[step.level]),
     0,
   )
-  if (currentMaxLevel < levelRank[rule.approvalLevel]) {
+  if (packageItem.approvalRoute.length && currentMaxLevel < levelRank[rule.approvalLevel]) {
     add(
       'escalation',
       'high',
@@ -168,6 +168,16 @@ export function validatePackage(
         'medium',
         `${file.name} 尚有 ${pendingPages.length} 页未完成分类核对。`,
         '逐页确认资料分类、受控技术属性和脱敏状态。',
+      )
+    }
+    const controlledPages = activeVersion?.pages.filter((page) => page.controlled) ?? []
+    const unmaskedControlledPages = controlledPages.filter((page) => !page.desensitized)
+    if (unmaskedControlledPages.length) {
+      add(
+        'desensitization',
+        'high',
+        `${file.name} 有 ${unmaskedControlledPages.length} 页受控内容尚未确认脱敏。`,
+        '替换为脱敏版本或完成逐页脱敏结论后，才能收拢受控副本并提交签署。',
       )
     }
   })

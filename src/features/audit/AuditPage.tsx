@@ -85,6 +85,16 @@ export function AuditPage() {
         status: item.status,
         round: item.currentRound,
         rule: workspace.rules.find((rule) => rule.id === item.matchedRuleId)?.name,
+        activeControlledCopyId: item.activeControlledCopyId,
+        controlledCopies: workspace.controlledCopies
+          .filter((copy) => copy.packageId === item.id)
+          .map((copy) => ({
+            id: copy.id,
+            status: copy.status,
+            round: copy.round,
+            signatures: copy.signatures.length,
+            writeoff: copy.writeoff,
+          })),
         files: workspace.files
           .filter((file) => file.packageId === item.id)
           .map((file) => ({

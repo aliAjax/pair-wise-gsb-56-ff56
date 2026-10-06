@@ -4,12 +4,19 @@ export type PackageStatus =
   | 'validating'
   | 'reviewing'
   | 'returned'
+  | 'stale'
   | 'approved'
   | 'licensed'
   | 'locked'
 export type ApprovalLevel = 'standard' | 'enhanced' | 'senior'
 export type FindingLevel = 'high' | 'medium' | 'low'
-export type FindingType = 'missing-declaration' | 'escalation' | 'version-mismatch' | 'unclassified-page' | 'quota'
+export type FindingType =
+  | 'missing-declaration'
+  | 'escalation'
+  | 'version-mismatch'
+  | 'unclassified-page'
+  | 'desensitization'
+  | 'quota'
 
 export interface PageReview {
   id: string
@@ -42,15 +49,18 @@ export interface MaterialFile {
   versions: FileVersion[]
 }
 
+export type ApprovalStepStatus = 'waiting' | 'active' | 'approved' | 'returned' | 'invalid'
+
 export interface ApprovalStep {
   id: string
   order: number
   role: string
   assignee: string
   level: ApprovalLevel
-  status: 'waiting' | 'active' | 'approved' | 'returned'
+  status: ApprovalStepStatus
   comment: string
   decidedAt?: string
+  copyId?: string
 }
 
 export interface PackageVersion {
@@ -80,6 +90,84 @@ export interface ReviewComment {
   round: number
 }
 
+export interface ControlledFileSnapshot {
+  fileId: string
+  name: string
+  kind: MaterialCategory
+  versionId: string
+  label: string
+  hash: string
+  uploadedAt: string
+  sizeKb: number
+  pages: PageReview[]
+}
+
+export interface ControlledPackageSnapshot {
+  code: string
+  title: string
+  category: MaterialCategory
+  applicant: string
+  recipient: string
+  destination: string
+  endUse: string
+  technologyTags: string[]
+  personnelScopes: string[]
+  declarations: string[]
+}
+
+export interface ControlledQuotaSnapshot {
+  used: number
+  limit: number
+  available: number
+}
+
+export type ControlledCopyStatus =
+  | 'active'
+  | 'invalid'
+  | 'returned'
+  | 'signed'
+  | 'writeoff_failed'
+  | 'licensed'
+
+export interface ControlledSignature {
+  requestId: string
+  stepId: string
+  role: string
+  signer: string
+  decision: 'approve' | 'return'
+  comment: string
+  signedAt: string
+}
+
+export interface ControlledWriteoff {
+  requestId: string
+  amount: number
+  status: 'reserved' | 'failed' | 'completed'
+  reservedAt: string
+  lastAttemptAt: string
+  completedAt?: string
+  failureReason?: string
+}
+
+export interface ControlledCopy {
+  id: string
+  packageId: string
+  round: number
+  ruleId: string
+  status: ControlledCopyStatus
+  createdBy: string
+  createdAt: string
+  invalidatedAt?: string
+  invalidationReason?: string
+  sourceFingerprint: string
+  packageSnapshot: ControlledPackageSnapshot
+  declarations: string[]
+  files: ControlledFileSnapshot[]
+  quota: ControlledQuotaSnapshot
+  signatures: ControlledSignature[]
+  writeoff?: ControlledWriteoff
+}
+
 export interface MaterialPackage {
   id: string
   code: string
@@ -94,6 +182,7 @@ export interface MaterialPackage {
   declarations: string[]
   status: PackageStatus
   matchedRuleId?: string
+  activeControlledCopyId?: string
   approvalRoute: ApprovalStep[]
   currentRound: number
   quotaUsed: number
@@ -140,6 +229,7 @@ export interface WorkspaceState {
   packages: MaterialPackage[]
   files: MaterialFile[]
   rules: LicenseRule[]
+  controlledCopies: ControlledCopy[]
   findings: ValidationFinding[]
   comments: ReviewComment[]
   audit: AuditEntry[]

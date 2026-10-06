@@ -1,7 +1,7 @@
 import type { WorkspaceState } from '@/types/domain'
 import { createInitialState } from './mockData'
 
-const STORAGE_KEY = 'export-control-review-v1'
+const STORAGE_KEY = 'export-control-review-v2'
 
 export function loadWorkspace(): WorkspaceState {
   const raw = window.localStorage.getItem(STORAGE_KEY)

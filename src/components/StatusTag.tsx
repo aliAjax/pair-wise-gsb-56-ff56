@@ -7,6 +7,7 @@ const colors: Record<PackageStatus, string> = {
   validating: 'processing',
   reviewing: 'gold',
   returned: 'error',
+  stale: 'warning',
   approved: 'cyan',
   licensed: 'green',
   locked: 'blue',

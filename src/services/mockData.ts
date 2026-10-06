@@ -1,4 +1,5 @@
 import type {
+  ControlledCopy,
   FileVersion,
   LicenseRule,
   MaterialFile,
@@ -7,6 +8,7 @@ import type {
   WorkspaceState,
 } from '@/types/domain'
 import { createApprovalRoute, validatePackage } from './rules'
+import { attachCopyToRoute, createControlledCopy } from './controlledCopy'
 
 function pages(
   count: number,
@@ -117,6 +119,24 @@ const sw2 = version('V2.1', 6, true, '52CC-8D10', '修复通信模块并更新�
 const us1 = version('V3.2', 12, false, 'E11A-77B4', '光刻设备参数说明', { controlled: true })
 const my1 = version('V1.0', 4, false, '88AB-3411', '厂房布置示意')
 
+const route1 = createApprovalRoute('enhanced')
+const route2 = createApprovalRoute('standard').map((step) => ({
+  ...step,
+  status: 'approved' as const,
+  comment: '资料范围和声明完整。',
+  decidedAt: '2026-09-27T03:20:00.000Z',
+}))
+const route3 = createApprovalRoute('senior').map((step, index) =>
+  index === 0
+    ? {
+        ...step,
+        status: 'returned' as const,
+        comment: '缺少人员接触清单。',
+        decidedAt: '2026-09-26T08:10:00.000Z',
+      }
+    : { ...step },
+)
+
 export function createInitialState(): WorkspaceState {
   const now = '2026-09-28T06:00:00.000Z'
   const packages: MaterialPackage[] = [
@@ -132,9 +152,9 @@ export function createInitialState(): WorkspaceState {
       technologyTags: ['复合材料', '工艺参数'],
       personnelScopes: ['第三方承包商'],
       declarations: ['最终用户声明', '最终用途声明'],
-      status: 'reviewing',
+      status: 'stale',
       matchedRuleId: 'rule-sg-composite',
-      approvalRoute: createApprovalRoute('enhanced'),
+      approvalRoute: route1,
       currentRound: 1,
       quotaUsed: 36,
       quotaLimit: 80,
@@ -156,12 +176,7 @@ export function createInitialState(): WorkspaceState {
       declarations: ['最终用户声明', '软件用途声明'],
       status: 'approved',
       matchedRuleId: 'rule-de-software',
-      approvalRoute: createApprovalRoute('standard').map((step) => ({
-        ...step,
-        status: 'approved',
-        comment: '资料范围和声明完整。',
-        decidedAt: '2026-09-27T03:20:00.000Z',
-      })),
+      approvalRoute: route2,
       currentRound: 1,
       quotaUsed: 42,
       quotaLimit: 120,
@@ -183,16 +198,7 @@ export function createInitialState(): WorkspaceState {
       declarations: ['最终用户声明', '最终用途声明', '技术转移声明'],
       status: 'returned',
       matchedRuleId: 'rule-us-lithography',
-      approvalRoute: createApprovalRoute('senior').map((step, index) =>
-        index === 0
-          ? {
-              ...step,
-              status: 'returned' as const,
-              comment: '缺少人员接触清单。',
-              decidedAt: '2026-09-26T08:10:00.000Z',
-            }
-          : { ...step },
-      ),
+      approvalRoute: route3,
       currentRound: 2,
       quotaUsed: 27,
       quotaLimit: 30,
@@ -272,6 +278,63 @@ export function createInitialState(): WorkspaceState {
     },
   ]
 
+  const controlledCopies: ControlledCopy[] = []
+
+  function buildControlledCopy(
+    packageItem: (typeof packages)[number],
+    rule: LicenseRule,
+    preferredVersions: Record<string, string> = {},
+  ) {
+    const copy = createControlledCopy(packageItem, files, {
+      rule,
+      createdBy: packageItem.applicant,
+      createdAt: packageItem.createdAt,
+      preferredVersions,
+    })
+    packageItem.approvalRoute = attachCopyToRoute(copy, packageItem.approvalRoute)
+    packageItem.activeControlledCopyId = copy.id
+    controlledCopies.push(copy)
+    return copy
+  }
+
+  const copy1 = buildControlledCopy(packages[0], rules[0], {
+    'file-001-a': v1.id,
+    'file-001-b': v1.id,
+  })
+  copy1.status = 'invalid'
+  copy1.invalidatedAt = '2026-09-28T05:40:00.000Z'
+  copy1.invalidationReason = '现行文件版本已更新，审批引用对象失效。'
+  packages[0].approvalRoute = packages[0].approvalRoute.map((step) => ({
+    ...step,
+    status: 'invalid',
+  }))
+
+  const copy2 = buildControlledCopy(packages[1], rules[1])
+  copy2.status = 'signed'
+  copy2.signatures = packages[1].approvalRoute.map((step) => ({
+    requestId: `seed-sign-${step.id}`,
+    stepId: step.id,
+    role: step.role,
+    signer: step.assignee,
+    decision: 'approve',
+    comment: step.comment,
+    signedAt: step.decidedAt ?? '2026-09-27T03:20:00.000Z',
+  }))
+
+  const copy3 = buildControlledCopy(packages[2], rules[2])
+  copy3.status = 'returned'
+  copy3.signatures = [
+    {
+      requestId: 'seed-return-pkg-003',
+      stepId: packages[2].approvalRoute[0].id,
+      role: packages[2].approvalRoute[0].role,
+      signer: packages[2].approvalRoute[0].assignee,
+      decision: 'return',
+      comment: '缺少人员接触清单。',
+      signedAt: '2026-09-26T08:10:00.000Z',
+    },
+  ]
+
   packages.forEach((packageItem) => {
     const summary =
       packageItem.status === 'draft'
@@ -329,6 +392,7 @@ export function createInitialState(): WorkspaceState {
     packages,
     files,
     rules,
+    controlledCopies,
     findings,
     comments: [
       {
@@ -391,6 +455,7 @@ export const packageStatusLabels: Record<MaterialPackage['status'], string> = {
   validating: '校验中',
   reviewing: '审批中',
   returned: '已退回',
+  stale: '待复核',
   approved: '已批准',
   licensed: '已许可',
   locked: '已归档',

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   Alert,
   Button,
+  Checkbox,
   Descriptions,
   InputNumber,
   Progress,
@@ -15,21 +16,24 @@ import type { TableColumnsType } from 'antd'
 import { SafetyCertificateOutlined } from '@ant-design/icons'
 import { useSearchParams } from 'react-router-dom'
 import { PageHeader } from '@/components/PageHeader'
+import { ControlledCopyPanel } from '@/components/ControlledCopyPanel'
 import {
-  useDeductQuotaMutation,
   useGetWorkspaceQuery,
   useValidatePackageMutation,
+  useWriteoffLicenseMutation,
 } from '@/app/api'
 import type { LicenseRule } from '@/types/domain'
-import { approvalLevelLabels, findApplicableRule } from '@/services/rules'
+import { approvalLevelLabels } from '@/services/rules'
 
 export function LicensePage() {
   const [searchParams] = useSearchParams()
-  const { data, isLoading } = useGetWorkspaceQuery()
+  const { data, isLoading, refetch } = useGetWorkspaceQuery()
   const [validatePackage] = useValidatePackageMutation()
-  const [deductQuota, deductState] = useDeductQuotaMutation()
+  const [writeoffLicense, writeoffState] = useWriteoffLicenseMutation()
   const [selectedId, setSelectedId] = useState(searchParams.get('package') ?? '')
   const [amount, setAmount] = useState(5)
+  const [simulateFailure, setSimulateFailure] = useState(false)
+  const [writeoffRequestId, setWriteoffRequestId] = useState('')
 
   useEffect(() => {
     if (!selectedId && data?.packages[0]) setSelectedId(data.packages[0].id)
@@ -39,11 +43,37 @@ export function LicensePage() {
     () => data?.packages.find((item) => item.id === selectedId),
     [data, selectedId],
   )
-  const applicableRule = selected && data ? findApplicableRule(selected, data.rules) : undefined
+  const targetCopy = useMemo(
+    () =>
+      data?.controlledCopies
+        .filter(
+          (copy) =>
+            copy.packageId === selectedId &&
+            ['signed', 'writeoff_failed', 'licensed'].includes(copy.status),
+        )
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0],
+    [data, selectedId],
+  )
+
+  useEffect(() => {
+    if (targetCopy?.writeoff) {
+      setAmount(targetCopy.writeoff.amount)
+      setWriteoffRequestId(targetCopy.writeoff.requestId)
+      setSimulateFailure(false)
+    } else {
+      setAmount(5)
+      setWriteoffRequestId(`writeoff-${crypto.randomUUID()}`)
+      setSimulateFailure(false)
+    }
+  }, [selectedId, targetCopy?.id, targetCopy?.writeoff?.requestId, targetCopy?.writeoff?.amount])
+
+  const snapshotRule = data?.rules.find((item) => item.id === targetCopy?.ruleId)
   const currentRule = data?.rules.find((item) => item.id === selected?.matchedRuleId)
+  const applicableRule = snapshotRule ?? currentRule
   const packageFindings = data?.findings.filter((item) => item.packageId === selectedId) ?? []
   const hasHighFindings = packageFindings.some((item) => item.level === 'high')
   const remaining = selected ? selected.quotaLimit - selected.quotaUsed : 0
+  const retryMode = targetCopy?.status === 'writeoff_failed'
 
   if (isLoading || !data) return <div className="panel">正在加载许可规则...</div>
 
@@ -67,11 +97,7 @@ export function LicensePage() {
       width: 110,
       render: (value: LicenseRule['approvalLevel']) => approvalLevelLabels[value],
     },
-    {
-      title: '规则额度',
-      dataIndex: 'quotaLimit',
-      width: 100,
-    },
+    { title: '规则额度', dataIndex: 'quotaLimit', width: 100 },
   ]
 
   async function refreshValidation() {
@@ -80,28 +106,42 @@ export function LicensePage() {
     message.success('规则匹配和缺失声明已重新校验')
   }
 
-  async function deduct() {
-    if (!selected) return
+  async function writeoff() {
+    if (!selected || !targetCopy) return
+    const requestId = targetCopy.writeoff?.requestId ?? writeoffRequestId
     try {
-      await deductQuota({ packageId: selected.id, amount }).unwrap()
-      message.success(`已扣减 ${amount} 个许可额度`)
+      await writeoffLicense({
+        packageId: selected.id,
+        copyId: targetCopy.id,
+        amount,
+        requestId,
+        simulateFailure,
+      }).unwrap()
+      message.success(retryMode ? '原副本核销重试成功，未再次扣减额度' : '许可核销完成')
     } catch (error) {
       const detail =
         typeof error === 'object' && error && 'data' in error
           ? (error.data as { error?: string }).error
           : undefined
-      message.error(detail ?? '额度扣减失败')
+      message.error(detail ?? '许可核销失败')
+      refetch()
     }
   }
+
+  const declarationSource = targetCopy?.declarations ?? selected?.declarations ?? []
+  const writeoffDisabled =
+    !targetCopy ||
+    !['signed', 'writeoff_failed'].includes(targetCopy.status) ||
+    (!retryMode && (amount <= 0 || amount > Math.max(remaining, 0)))
 
   return (
     <div>
       <PageHeader
         title="许可与额度"
-        description="根据资料分类、国家地区、技术参数和人员范围匹配规则，补正声明并控制额度扣减。"
+        description="许可核销只引用审批发起时收拢的受控副本；失败后按原副本和原额度请求重试。"
         actions={
           selected ? (
-            <Button loading={deductState.isLoading} onClick={refreshValidation}>
+            <Button loading={writeoffState.isLoading} onClick={refreshValidation}>
               重新校验
             </Button>
           ) : null
@@ -125,20 +165,25 @@ export function LicensePage() {
           />
           {selected ? (
             <Descriptions column={1} bordered size="small" style={{ marginTop: 16 }}>
-              <Descriptions.Item label="收件方">{selected.recipient}</Descriptions.Item>
-              <Descriptions.Item label="最终用途">{selected.endUse}</Descriptions.Item>
+              <Descriptions.Item label="收件方">
+                {targetCopy?.packageSnapshot.recipient ?? selected.recipient}
+              </Descriptions.Item>
+              <Descriptions.Item label="最终用途">
+                {targetCopy?.packageSnapshot.endUse ?? selected.endUse}
+              </Descriptions.Item>
               <Descriptions.Item label="技术参数">
-                {selected.technologyTags.join('、')}
+                {(targetCopy?.packageSnapshot.technologyTags ?? selected.technologyTags).join('、')}
               </Descriptions.Item>
               <Descriptions.Item label="人员范围">
-                {selected.personnelScopes.join('、') || '无特别范围'}
+                {(targetCopy?.packageSnapshot.personnelScopes ?? selected.personnelScopes).join('、') ||
+                  '无特别范围'}
               </Descriptions.Item>
               <Descriptions.Item label="审批状态">
                 {selected.status === 'approved'
-                  ? '已批准，可核对额度'
+                  ? '已批准，可按受控副本核销'
                   : selected.status === 'licensed'
-                    ? '已扣减额度'
-                    : '尚未完成审批'}
+                    ? '已完成核销'
+                    : '尚未完成签署'}
               </Descriptions.Item>
             </Descriptions>
           ) : null}
@@ -146,7 +191,7 @@ export function LicensePage() {
 
         <section className="panel">
           <div className="panel-title">
-            <h3>规则匹配解释</h3>
+            <h3>签署副本规则匹配</h3>
             <Tag color={applicableRule ? 'success' : 'error'}>
               {applicableRule ? '存在适用规则' : '无适用规则'}
             </Tag>
@@ -160,12 +205,12 @@ export function LicensePage() {
                 description={applicableRule.explanation}
               />
               <div>
-                <strong>必要声明核对</strong>
+                <strong>必要声明核对（以副本为准）</strong>
                 <div style={{ marginTop: 8 }}>
                   {applicableRule.requiredDeclarations.map((declaration) => (
                     <Tag
                       key={declaration}
-                      color={selected?.declarations.includes(declaration) ? 'success' : 'error'}
+                      color={declarationSource.includes(declaration) ? 'success' : 'error'}
                     >
                       {declaration}
                     </Tag>
@@ -175,8 +220,8 @@ export function LicensePage() {
               <div>
                 <strong>审批升级</strong>
                 <div className="muted" style={{ marginTop: 5 }}>
-                  规则要求 {approvalLevelLabels[applicableRule.approvalLevel]}；当前路线规则：
-                  {currentRule?.name ?? '未生成'}。
+                  签署副本规则：{snapshotRule?.name ?? '尚未生成签署副本'}；当前主系统规则：
+                  {currentRule?.name ?? '未匹配'}。
                 </div>
               </div>
             </Space>
@@ -186,10 +231,20 @@ export function LicensePage() {
         </section>
       </div>
 
+      <section className="panel">
+        <div className="panel-title">
+          <h3>签署受控副本</h3>
+          <span className="muted">核销对象、声明、页结论和额度占用均不可随原件漂移</span>
+        </div>
+        {targetCopy ? <ControlledCopyPanel copy={targetCopy} /> : (
+          <Alert type="warning" showIcon message="当前资料包尚未完成签署，不能进行许可核销。" />
+        )}
+      </section>
+
       <div className="two-column">
         <section className="panel">
           <div className="panel-title">
-            <h3>缺失声明与升级要求</h3>
+            <h3>当前核对项</h3>
             <Tag color={hasHighFindings ? 'error' : 'success'}>{packageFindings.length} 项</Tag>
           </div>
           <Space direction="vertical" size={10} style={{ width: '100%' }}>
@@ -205,53 +260,75 @@ export function LicensePage() {
             {!packageFindings.length ? (
               <Alert type="success" showIcon message="当前资料包没有许可核对缺口。" />
             ) : null}
+            {targetCopy?.status === 'signed' && hasHighFindings ? (
+              <Alert
+                type="info"
+                showIcon
+                message="签署后的新核对项不会改变已签署副本；需要退回补正时应重新发起审批。"
+              />
+            ) : null}
           </Space>
         </section>
 
         <section className="panel">
           <div className="panel-title">
-            <h3>许可额度扣减</h3>
+            <h3>许可核销</h3>
             <SafetyCertificateOutlined />
           </div>
-          {selected ? (
+          {selected && targetCopy ? (
             <Space direction="vertical" size={16} style={{ width: '100%' }}>
               <Progress
-                percent={Math.round((selected.quotaUsed / selected.quotaLimit) * 100)}
+                percent={Math.min(100, Math.round((selected.quotaUsed / selected.quotaLimit) * 100))}
                 status={selected.quotaUsed >= selected.quotaLimit ? 'exception' : 'active'}
               />
               <div>
-                已使用 {selected.quotaUsed}，剩余 {remaining}，规则上限 {selected.quotaLimit}
+                当前已使用 {selected.quotaUsed}，剩余 {remaining}；副本发起时占用 {targetCopy.quota.used}
+                ，固定可用 {targetCopy.quota.available}，上限 {targetCopy.quota.limit}。
               </div>
               <InputNumber
                 min={1}
-                max={Math.max(1, remaining)}
+                max={retryMode ? targetCopy.writeoff?.amount : Math.max(1, remaining)}
                 value={amount}
+                disabled={retryMode}
                 onChange={(value) => setAmount(value ?? 1)}
                 addonAfter="额度单位"
                 style={{ width: '100%' }}
               />
+              <Checkbox
+                checked={simulateFailure}
+                disabled={retryMode}
+                onChange={(event) => setSimulateFailure(event.target.checked)}
+              >
+                演示：首次外部核销确认失败（额度先预占）
+              </Checkbox>
               <Button
                 type="primary"
                 block
-                disabled={
-                  selected.status !== 'approved' ||
-                  hasHighFindings ||
-                  amount > remaining ||
-                  remaining <= 0
-                }
-                loading={deductState.isLoading}
-                onClick={deduct}
+                disabled={writeoffDisabled}
+                loading={writeoffState.isLoading}
+                onClick={writeoff}
               >
-                确认扣减并完成许可
+                {retryMode ? `按原副本重试核销 ${amount}` : `确认核销 ${amount} 并预占额度`}
               </Button>
-              {selected.status !== 'approved' ? (
-                <Alert type="warning" showIcon message="只有全部审批步骤完成后才允许扣减额度。" />
-              ) : null}
-              {hasHighFindings ? (
-                <Alert type="error" showIcon message="存在高风险核对项，系统拒绝扣减额度。" />
-              ) : null}
+              {retryMode ? (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="上次外部核销失败，额度已在首次请求中预占。"
+                  description="重试继续使用同一受控副本、金额和幂等编号，不会再次扣减额度。"
+                />
+              ) : targetCopy.status === 'licensed' ? (
+                <Alert type="success" showIcon message="该受控副本已完成核销，重复回放只返回既有结果。" />
+              ) : (
+                <Alert type="info" showIcon message="只有全部签署完成的受控副本才允许核销。" />
+              )}
+              <div className="muted mono" style={{ fontSize: 12 }}>
+                幂等编号：{(targetCopy.writeoff?.requestId ?? writeoffRequestId).slice(0, 28)}…
+              </div>
             </Space>
-          ) : null}
+          ) : (
+            <Alert type="warning" showIcon message="请先完成审批签署并生成受控副本。" />
+          )}
         </section>
       </div>
 

@@ -15,7 +15,7 @@ export function DashboardPage() {
 
   const highFindings = data.findings.filter((item) => item.level === 'high')
   const activePackages = data.packages.filter((item) =>
-    ['validating', 'reviewing', 'returned'].includes(item.status),
+    ['validating', 'reviewing', 'returned', 'stale'].includes(item.status),
   )
   const controlledPages = data.files.reduce(
     (total, file) =>

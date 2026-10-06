@@ -15,6 +15,7 @@ import type { TableColumnsType } from 'antd'
 import { useSearchParams } from 'react-router-dom'
 import { PageHeader } from '@/components/PageHeader'
 import { StatusTag } from '@/components/StatusTag'
+import { ControlledCopyPanel } from '@/components/ControlledCopyPanel'
 import {
   useDecideApprovalMutation,
   useGetWorkspaceQuery,
@@ -25,13 +26,15 @@ import { approvalLevelLabels } from '@/services/rules'
 
 export function ApprovalPage() {
   const [searchParams] = useSearchParams()
-  const { data, isLoading } = useGetWorkspaceQuery()
+  const { data, isLoading, refetch } = useGetWorkspaceQuery()
   const [submitApproval, submitState] = useSubmitApprovalMutation()
   const [decideApproval, decideState] = useDecideApprovalMutation()
   const [selectedId, setSelectedId] = useState(searchParams.get('package') ?? '')
   const [decision, setDecision] = useState<'approve' | 'return'>('approve')
   const [decisionOpen, setDecisionOpen] = useState(false)
   const [comment, setComment] = useState('')
+  const [signer, setSigner] = useState('')
+  const [decisionRequestId, setDecisionRequestId] = useState('')
   const [decidingStep, setDecidingStep] = useState<ApprovalStep>()
 
   useEffect(() => {
@@ -44,6 +47,13 @@ export function ApprovalPage() {
   )
   const rule = data?.rules.find((item) => item.id === selected?.matchedRuleId)
   const activeStep = selected?.approvalRoute.find((step) => step.status === 'active')
+  const currentCopy = useMemo(
+    () =>
+      data?.controlledCopies
+        .filter((copy) => copy.packageId === selectedId)
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0],
+    [data, selectedId],
+  )
 
   if (isLoading || !data) return <div className="panel">正在加载审批路线...</div>
   const workspace = data
@@ -94,7 +104,9 @@ export function ApprovalPage() {
                 ? 'processing'
                 : value === 'returned'
                   ? 'error'
-                  : 'default'
+                  : value === 'invalid'
+                    ? 'warning'
+                    : 'default'
           }
         >
           {value === 'approved'
@@ -103,7 +115,9 @@ export function ApprovalPage() {
               ? '待审批'
               : value === 'returned'
                 ? '已退回'
-                : '未开始'}
+                : value === 'invalid'
+                  ? '待复核'
+                  : '未开始'}
         </Tag>
       ),
     },
@@ -120,29 +134,26 @@ export function ApprovalPage() {
           <Space>
             <Button
               type="link"
-              onClick={() => {
-                setDecidingStep(record)
-                setDecision('approve')
-                setDecisionOpen(true)
-              }}
+              onClick={() => openDecision(record, 'approve')}
             >
               通过
             </Button>
-            <Button
-              type="link"
-              danger
-              onClick={() => {
-                setDecidingStep(record)
-                setDecision('return')
-                setDecisionOpen(true)
-              }}
-            >
+            <Button type="link" danger onClick={() => openDecision(record, 'return')}>
               退回
             </Button>
           </Space>
         ) : null,
     },
   ]
+
+  function openDecision(step: ApprovalStep, nextDecision: 'approve' | 'return') {
+    setDecidingStep(step)
+    setDecision(nextDecision)
+    setComment('')
+    setSigner(step.assignee)
+    setDecisionRequestId(`sign-${crypto.randomUUID()}`)
+    setDecisionOpen(true)
+  }
 
   async function submitCurrent() {
     if (!selected) return
@@ -153,22 +164,44 @@ export function ApprovalPage() {
       message.error('存在高风险核对项，请先修复后提交')
       return
     }
-    await submitApproval({ packageId: selected.id }).unwrap()
-    message.success('审批路线已生成或重新发起')
+    try {
+      await submitApproval({ packageId: selected.id }).unwrap()
+      message.success('已收拢受控副本并生成审批路线')
+    } catch (error) {
+      const detail =
+        typeof error === 'object' && error && 'data' in error
+          ? (error.data as { error?: string }).error
+          : undefined
+      message.error(detail ?? '提交审批失败')
+      refetch()
+    }
   }
 
   async function confirmDecision() {
     if (!selected || !decidingStep) return
-    await decideApproval({
-      packageId: selected.id,
-      stepId: decidingStep.id,
-      decision,
-      comment,
-    }).unwrap()
-    message.success(decision === 'approve' ? '审批步骤已通过' : '资料包已退回，进入新一轮补正')
-    setDecisionOpen(false)
-    setComment('')
-    setDecidingStep(undefined)
+    try {
+      await decideApproval({
+        packageId: selected.id,
+        stepId: decidingStep.id,
+        decision,
+        comment,
+        signer,
+        requestId: decisionRequestId,
+      }).unwrap()
+      message.success(decision === 'approve' ? '签署已落章' : '资料包已退回，进入新一轮补正')
+      setDecisionOpen(false)
+      setComment('')
+      setSigner('')
+      setDecisionRequestId('')
+      setDecidingStep(undefined)
+    } catch (error) {
+      const detail =
+        typeof error === 'object' && error && 'data' in error
+          ? (error.data as { error?: string }).error
+          : undefined
+      message.error(detail ?? '审批处理失败')
+      refetch()
+    }
   }
 
   return (
@@ -180,7 +213,7 @@ export function ApprovalPage() {
           selected ? (
             <Button
               type="primary"
-              disabled={Boolean(activeStep)}
+              disabled={Boolean(activeStep) || selected.status === 'licensed'}
               loading={submitState.isLoading}
               onClick={submitCurrent}
             >
@@ -226,7 +259,9 @@ export function ApprovalPage() {
                           ? '已退回'
                           : step.status === 'active'
                             ? '待处理'
-                            : '等待前序步骤'
+                            : step.status === 'invalid'
+                              ? '待复核'
+                              : '等待前序步骤'
                     }`,
                     status:
                       step.status === 'approved'
@@ -235,7 +270,9 @@ export function ApprovalPage() {
                           ? 'error'
                           : step.status === 'active'
                             ? 'process'
-                            : 'wait',
+                            : step.status === 'invalid'
+                              ? 'error'
+                              : 'wait',
                   }))}
                 />
               ) : (
@@ -269,6 +306,25 @@ export function ApprovalPage() {
             </Descriptions>
           </section>
         </div>
+      ) : null}
+
+      {selected ? (
+        <section className="panel">
+          <div className="panel-title">
+            <h3>签署受控副本</h3>
+            <span className="muted">发起时固化，后续只允许引用该副本签署和核销</span>
+          </div>
+          <ControlledCopyPanel copy={currentCopy} />
+          {currentCopy?.status === 'invalid' ? (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginTop: 14 }}
+              message="原件已修改，引用旧副本的审批步骤已失效。"
+              description="请处理高风险核对项后重新提交，系统会收拢新的受控副本。"
+            />
+          ) : null}
+        </section>
       ) : null}
 
       {selected ? (
@@ -311,6 +367,15 @@ export function ApprovalPage() {
           onChange={(event) => setComment(event.target.value)}
           placeholder={decision === 'approve' ? '填写审批意见' : '明确说明退回原因和补正要求'}
         />
+        <Input
+          style={{ marginTop: 12 }}
+          value={signer}
+          onChange={(event) => setSigner(event.target.value)}
+          addonBefore="签署人"
+        />
+        <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
+          幂等编号：{decisionRequestId.slice(0, 24)}…，重复回放不会重复落章。
+        </div>
       </Modal>
     </div>
   )
